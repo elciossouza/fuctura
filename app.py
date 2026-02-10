@@ -16,6 +16,10 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# ─── Configuração fixa da planilha ───
+SPREADSHEET_URL = "https://docs.google.com/spreadsheets/d/1PnZtUVbwFWOmonSysb0YDfHgpfWsA1r-VkGgUy8-Xh8/edit?gid=302051685#gid=302051685"
+SHEET_NAME = "Dados WhatsApp"
+
 # ─── Estilos CSS ───
 st.markdown("""
 <style>
@@ -68,7 +72,7 @@ STATUS_ORDER = ["Qualificado", "Convertido", "Desqualificado", "Achei", "Não in
 
 # ─── Funções de conexão e dados ───
 @st.cache_data(ttl=300)
-def carregar_dados(spreadsheet_url: str, sheet_name: str) -> pd.DataFrame:
+def carregar_dados() -> pd.DataFrame:
     """Carrega dados do Google Sheets usando credenciais do secrets."""
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets.readonly",
@@ -79,11 +83,19 @@ def carregar_dados(spreadsheet_url: str, sheet_name: str) -> pd.DataFrame:
     credentials = Credentials.from_service_account_info(credentials_info, scopes=scopes)
     client = gspread.authorize(credentials)
 
-    spreadsheet = client.open_by_url(spreadsheet_url)
-    worksheet = spreadsheet.worksheet(sheet_name)
-    data = worksheet.get_all_records()
+    spreadsheet = client.open_by_url(SPREADSHEET_URL)
+    worksheet = spreadsheet.worksheet(SHEET_NAME)
 
-    df = pd.DataFrame(data)
+    # Usar get_all_values() para evitar erro de NA to integer
+    all_values = worksheet.get_all_values()
+
+    if len(all_values) < 2:
+        return pd.DataFrame()
+
+    headers = all_values[0]
+    rows = all_values[1:]
+
+    df = pd.DataFrame(rows, columns=headers)
     return df
 
 
@@ -91,11 +103,15 @@ def preparar_dados(df: pd.DataFrame) -> pd.DataFrame:
     """Limpa e prepara os dados para análise."""
     df = df.copy()
 
+    # Converter todas as colunas para string primeiro para evitar erros
+    for col in df.columns:
+        df[col] = df[col].astype(str).str.strip()
+
     # Converter coluna de data
     df["data"] = pd.to_datetime(df["data"], dayfirst=True, errors="coerce")
 
     # Limpar qualificação
-    df["qualificacao"] = df["qualificacao"].astype(str).str.strip()
+    df["qualificacao"] = df["qualificacao"].str.strip()
     status_validos = STATUS_ORDER
     df = df[df["qualificacao"].isin(status_validos)].copy()
 
@@ -111,68 +127,47 @@ def preparar_dados(df: pd.DataFrame) -> pd.DataFrame:
     # Limpar UTMs
     for col in ["utm_campaign", "utm_source", "utm_medium", "utm_term"]:
         if col in df.columns:
-            df[col] = df[col].astype(str).str.strip()
             df[col] = df[col].replace({"": "Não informado", "nan": "Não informado", "None": "Não informado"})
 
     # Limpar CEP
     if "cep" in df.columns:
-        df["cep"] = df["cep"].astype(str).str.strip().str.replace(r"\D", "", regex=True)
+        df["cep"] = df["cep"].str.replace(r"\D", "", regex=True)
         df["cep"] = df["cep"].replace({"": "Não informado", "nan": "Não informado"})
+
+    # Limpar valor (converter para numérico)
+    if "valor" in df.columns:
+        df["valor"] = df["valor"].replace({"": "0", "nan": "0", "None": "0"})
+        df["valor"] = pd.to_numeric(
+            df["valor"].str.replace(r"[^\d.,]", "", regex=True).str.replace(",", "."),
+            errors="coerce"
+        ).fillna(0)
 
     return df
 
 
-# ─── Sidebar ───
-st.sidebar.image("https://img.icons8.com/fluency/96/combo-chart.png", width=60)
-st.sidebar.title("⚙️ Configurações")
+# ─── Carregar dados automaticamente ───
+st.title("📊 Dashboard de Leads")
 
-spreadsheet_url = st.sidebar.text_input(
-    "URL da Planilha Google Sheets",
-    placeholder="https://docs.google.com/spreadsheets/d/...",
-)
-
-sheet_name = st.sidebar.text_input(
-    "Nome da aba",
-    value="Página1",
-    help="Nome exato da aba na planilha.",
-)
-
-carregar = st.sidebar.button("🔄 Carregar Dados", type="primary", use_container_width=True)
-
-# ─── Estado ───
-if "df" not in st.session_state:
-    st.session_state.df = None
-
-if carregar and spreadsheet_url:
+try:
     with st.spinner("Conectando ao Google Sheets..."):
-        try:
-            raw = carregar_dados(spreadsheet_url, sheet_name)
-            st.session_state.df = preparar_dados(raw)
-            st.sidebar.success(f"✅ {len(st.session_state.df)} registros carregados!")
-        except Exception as e:
-            st.sidebar.error(f"❌ Erro: {e}")
-
-# ─── Tela inicial ───
-if st.session_state.df is None:
-    st.title("📊 Dashboard de Leads")
-    st.info(
-        "👈 Configure a URL da planilha na barra lateral e clique em **Carregar Dados** para iniciar."
-    )
-    st.markdown("""
-    ### Como configurar
-    1. Crie um **Service Account** no Google Cloud Console
-    2. Compartilhe a planilha com o e-mail do Service Account
-    3. Configure o arquivo `.streamlit/secrets.toml` com as credenciais
-    4. Cole a URL da planilha na barra lateral
-    5. Clique em **Carregar Dados**
-    """)
+        raw = carregar_dados()
+        df = preparar_dados(raw)
+        st.sidebar.success(f"✅ {len(df)} registros carregados!")
+except Exception as e:
+    st.error(f"❌ Erro ao carregar dados: {e}")
+    st.info("Verifique se as credenciais do Google estão configuradas corretamente nas Secrets do Streamlit.")
     st.stop()
 
-df = st.session_state.df
+# ─── Sidebar — Filtros ───
+st.sidebar.image("https://img.icons8.com/fluency/96/combo-chart.png", width=60)
+st.sidebar.title("🔍 Filtros")
 
-# ─── Filtros ───
+# Botão para recarregar dados
+if st.sidebar.button("🔄 Recarregar Dados", type="primary", use_container_width=True):
+    st.cache_data.clear()
+    st.rerun()
+
 st.sidebar.markdown("---")
-st.sidebar.subheader("🔍 Filtros")
 
 # Filtro de data
 col_data_min, col_data_max = st.sidebar.columns(2)
@@ -208,8 +203,7 @@ mask = (
 )
 df_filtrado = df[mask].copy()
 
-# ─── TÍTULO ───
-st.title("📊 Dashboard de Leads")
+# ─── Caption com período ───
 st.caption(f"Período: {filtro_data_inicio.strftime('%d/%m/%Y')} a {filtro_data_fim.strftime('%d/%m/%Y')} · {len(df_filtrado)} registros")
 
 # ══════════════════════════════════════════════════════════════
@@ -311,7 +305,6 @@ camp_qual = (
 )
 
 if not camp_qual.empty:
-    # Gráfico de barras empilhadas
     fig_camp = px.bar(
         camp_qual,
         x="utm_campaign",
@@ -331,19 +324,15 @@ if not camp_qual.empty:
     )
     st.plotly_chart(fig_camp, use_container_width=True)
 
-    # Tabela detalhada
     tabela_camp = camp_qual.pivot_table(
         index="utm_campaign", columns="qualificacao", values="quantidade", fill_value=0
     ).reset_index()
     tabela_camp.columns.name = None
-
-    # Reordenar colunas
     cols_order = ["utm_campaign"] + [s for s in STATUS_ORDER if s in tabela_camp.columns]
     tabela_camp = tabela_camp[cols_order]
-    tabela_camp["Total"] = tabela_camp[STATUS_ORDER].sum(axis=1, min_count=0)
+    tabela_camp["Total"] = tabela_camp[[s for s in STATUS_ORDER if s in tabela_camp.columns]].sum(axis=1)
     tabela_camp = tabela_camp.sort_values("Total", ascending=False)
     tabela_camp = tabela_camp.rename(columns={"utm_campaign": "Campanha"})
-
     st.dataframe(tabela_camp, use_container_width=True, hide_index=True)
 else:
     st.warning("Nenhum dado de campanha encontrado.")
@@ -362,7 +351,6 @@ if not df_google.empty:
         st.markdown("**Qualificação — Leads do Google**")
         google_qual = df_google["qualificacao"].value_counts().reset_index()
         google_qual.columns = ["Qualificação", "Quantidade"]
-
         fig_google_pie = px.pie(
             google_qual,
             names="Qualificação",
@@ -371,10 +359,7 @@ if not df_google.empty:
             color_discrete_map=CORES_QUALIFICACAO,
             hole=0.45,
         )
-        fig_google_pie.update_layout(
-            height=350,
-            margin=dict(l=0, r=0, t=10, b=0),
-        )
+        fig_google_pie.update_layout(height=350, margin=dict(l=0, r=0, t=10, b=0))
         st.plotly_chart(fig_google_pie, use_container_width=True)
 
     with col_g2:
@@ -403,9 +388,7 @@ if not df_google.empty:
         )
         st.plotly_chart(fig_google_camp, use_container_width=True)
 
-    # Termos de pesquisa por qualificação
     st.markdown("**Termos de Pesquisa (utm_term) por Status de Qualificação**")
-
     termos_qual = (
         df_google.groupby(["utm_term", "qualificacao"])
         .size()
@@ -414,7 +397,6 @@ if not df_google.empty:
     termos_qual = termos_qual[termos_qual["utm_term"] != "Não informado"]
 
     if not termos_qual.empty:
-        # Gráfico
         fig_termos = px.bar(
             termos_qual,
             x="quantidade",
@@ -434,7 +416,6 @@ if not df_google.empty:
         )
         st.plotly_chart(fig_termos, use_container_width=True)
 
-        # Tabela pivotada
         tabela_termos = termos_qual.pivot_table(
             index="utm_term", columns="qualificacao", values="quantidade", fill_value=0
         ).reset_index()
@@ -444,7 +425,6 @@ if not df_google.empty:
         tabela_termos["Total"] = tabela_termos[[s for s in STATUS_ORDER if s in tabela_termos.columns]].sum(axis=1)
         tabela_termos = tabela_termos.sort_values("Total", ascending=False)
         tabela_termos = tabela_termos.rename(columns={"utm_term": "Termo de Pesquisa"})
-
         st.dataframe(tabela_termos, use_container_width=True, hide_index=True)
     else:
         st.info("Nenhum termo de pesquisa (utm_term) encontrado para leads do Google.")
@@ -465,9 +445,7 @@ if not df_cep.empty:
         .reset_index(name="quantidade")
     )
 
-    # Top CEPs
     top_n = st.slider("Quantidade de CEPs a exibir", min_value=5, max_value=50, value=15, step=5)
-
     top_ceps = df_cep["cep"].value_counts().head(top_n).index.tolist()
     cep_qual_top = cep_qual[cep_qual["cep"].isin(top_ceps)]
 
@@ -490,7 +468,6 @@ if not df_cep.empty:
     )
     st.plotly_chart(fig_cep, use_container_width=True)
 
-    # Tabela completa
     tabela_cep = cep_qual.pivot_table(
         index="cep", columns="qualificacao", values="quantidade", fill_value=0
     ).reset_index()
@@ -500,7 +477,6 @@ if not df_cep.empty:
     tabela_cep["Total"] = tabela_cep[[s for s in STATUS_ORDER if s in tabela_cep.columns]].sum(axis=1)
     tabela_cep = tabela_cep.sort_values("Total", ascending=False)
     tabela_cep = tabela_cep.rename(columns={"cep": "CEP"})
-
     st.dataframe(tabela_cep, use_container_width=True, hide_index=True)
 else:
     st.warning("Nenhum CEP informado encontrado nos dados.")
