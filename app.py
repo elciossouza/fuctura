@@ -4,7 +4,6 @@ import plotly.express as px
 import plotly.graph_objects as go
 from google.oauth2.service_account import Credentials
 import gspread
-import json
 from datetime import datetime
 import numpy as np
 
@@ -70,6 +69,29 @@ CORES_QUALIFICACAO = {
 STATUS_ORDER = ["Qualificado", "Convertido", "Desqualificado", "Achei", "Não interagiu"]
 
 
+def parse_data(valor):
+    """Converte string de data para datetime, tratando múltiplos formatos."""
+    if not valor or str(valor).strip() == "":
+        return pd.NaT
+    valor = str(valor).strip()
+    # Formato ISO: 2026-02-10T08:39:20-0300
+    if "T" in valor:
+        try:
+            return pd.to_datetime(valor, utc=True).tz_localize(None)
+        except Exception:
+            try:
+                return pd.to_datetime(valor)
+            except Exception:
+                return pd.NaT
+    # Formato BR: 09/02/2026 12:40:09
+    for fmt in ["%d/%m/%Y %H:%M:%S", "%d/%m/%Y %H:%M", "%d/%m/%Y", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"]:
+        try:
+            return pd.to_datetime(valor, format=fmt)
+        except Exception:
+            continue
+    return pd.NaT
+
+
 # ─── Funções de conexão e dados ───
 @st.cache_data(ttl=300)
 def carregar_dados() -> pd.DataFrame:
@@ -103,12 +125,12 @@ def preparar_dados(df: pd.DataFrame) -> pd.DataFrame:
     """Limpa e prepara os dados para análise."""
     df = df.copy()
 
-    # Converter todas as colunas para string primeiro
+    # Converter todas as colunas para string
     for col in df.columns:
         df[col] = df[col].astype(str).str.strip()
 
-    # Converter coluna de data
-    df["data"] = pd.to_datetime(df["data"], dayfirst=True, format="mixed", errors="coerce")
+    # Converter coluna de data com parser robusto
+    df["data"] = df["data"].apply(parse_data)
 
     # Remover linhas sem data válida
     df = df.dropna(subset=["data"])
@@ -116,6 +138,9 @@ def preparar_dados(df: pd.DataFrame) -> pd.DataFrame:
     # Limpar qualificação
     df["qualificacao"] = df["qualificacao"].str.strip()
     df = df[df["qualificacao"].isin(STATUS_ORDER)].copy()
+
+    if df.empty:
+        return df
 
     # Dia da semana
     dias_map = {
@@ -133,7 +158,7 @@ def preparar_dados(df: pd.DataFrame) -> pd.DataFrame:
     # Limpar CEP
     if "cep" in df.columns:
         df["cep"] = df["cep"].str.replace(r"\D", "", regex=True)
-        df["cep"] = df["cep"].replace({"": "Não informado", "nan": "Não informado"})
+        df["cep"] = df["cep"].replace({"": "Não informado"})
 
     # Limpar valor
     if "valor" in df.columns:
@@ -159,6 +184,10 @@ except Exception as e:
     st.info("Verifique se as credenciais do Google estão configuradas corretamente nas Secrets do Streamlit.")
     st.stop()
 
+if df.empty:
+    st.warning("⚠️ Nenhum dado encontrado com qualificação válida.")
+    st.stop()
+
 # ─── Sidebar — Filtros ───
 st.sidebar.image("https://img.icons8.com/fluency/96/combo-chart.png", width=60)
 st.sidebar.title("🔍 Filtros")
@@ -171,8 +200,8 @@ st.sidebar.markdown("---")
 
 # Filtro de data
 col_data_min, col_data_max = st.sidebar.columns(2)
-data_min = df["data"].min().date() if pd.notna(df["data"].min()) else datetime(2024, 1, 1).date()
-data_max = df["data"].max().date() if pd.notna(df["data"].max()) else datetime.today().date()
+data_min = df["data"].min().date()
+data_max = df["data"].max().date()
 
 with col_data_min:
     filtro_data_inicio = st.date_input("De", value=data_min, min_value=data_min, max_value=data_max)
